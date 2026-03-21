@@ -1,0 +1,38 @@
+- name: Block PR if CodeRabbit finds issues
+  uses: actions/github-script@v7
+  with:
+    script: |
+      const prNumber = context.payload.pull_request.number;
+
+      const comments = await github.rest.issues.listComments({
+        ...context.repo,
+        issue_number: prNumber,
+      });
+
+      let hasBlocker = false;
+
+      for (const comment of comments.data) {
+        const isCodeRabbit = comment.user.login.toLowerCase().includes("coderabbit");
+        if (!isCodeRabbit) continue;
+
+        const body = comment.body.toLowerCase();
+
+        if (
+          body.includes("critical") ||
+          body.includes("high") ||
+          body.includes("medium") ||
+          body.includes("🔴") ||
+          body.includes("🟠") ||
+          body.includes("🟡")
+        ) {
+          hasBlocker = true;
+          console.log("❌ Blocking issue found:");
+          console.log(comment.body);
+        }
+      }
+
+      if (hasBlocker) {
+        core.setFailed("PR contains CodeRabbit issues (Critical/High/Medium)");
+      } else {
+        console.log("✅ No blocking issues");
+      }
