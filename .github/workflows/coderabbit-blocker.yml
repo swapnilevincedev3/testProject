@@ -1,0 +1,71 @@
+name: coderabbit-blocker
+
+on:
+  pull_request:   # IMPORTANT: triggers on all PR updates
+
+jobs:
+  coderabbit-blocker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check CodeRabbit Issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+            let attempts = 8;
+            let hasBlockingIssue = false;
+            let reviewFound = false;
+
+            while (attempts > 0) {
+              console.log(`Checking CodeRabbit... attempts left: ${attempts}`);
+
+              const { data: comments } = await github.rest.issues.listComments({
+                ...context.repo,
+                issue_number: prNumber,
+              });
+
+              for (const comment of comments) {
+                const user = comment.user.login.toLowerCase();
+                if (!user.includes("coderabbit")) continue;
+
+                const body = comment.body.toLowerCase();
+
+                // detect review finished
+                if (
+                  body.includes("review") ||
+                  body.includes("analysis") ||
+                  body.includes("no actionable")
+                ) {
+                  reviewFound = true;
+                }
+
+                // detect severity
+                if (
+                  body.includes("critical") ||
+                  body.includes("high") ||
+                  body.includes("medium") ||
+                  body.includes("🔴") ||
+                  body.includes("🟠") ||
+                  body.includes("🟡")
+                ) {
+                  hasBlockingIssue = true;
+                }
+              }
+
+              if (reviewFound) break;
+
+              await sleep(10000); // wait 10 sec
+              attempts--;
+            }
+
+            if (!reviewFound) {
+              core.setFailed("CodeRabbit review not completed");
+            } else if (hasBlockingIssue) {
+              core.setFailed("Blocked: CodeRabbit issues found");
+            } else {
+              console.log("✅ Clean PR");
+            }
