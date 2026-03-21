@@ -1,0 +1,95 @@
+name: coderabbit-blocker
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  coderabbit-blocker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run only for PR comments or PR events
+        id: context-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber = null;
+
+            if (context.payload.pull_request) {
+              prNumber = context.payload.pull_request.number;
+            } else if (context.payload.issue && context.payload.issue.pull_request) {
+              prNumber = context.payload.issue.number;
+            }
+
+            if (!prNumber) {
+              core.setOutput("skip", "true");
+              return;
+            }
+
+            core.setOutput("skip", "false");
+            core.setOutput("pr", prNumber);
+
+      - name: Skip if not PR
+        if: steps.context-check.outputs.skip == 'true'
+        run: echo "Skipping - not a PR"
+
+      - name: Analyze CodeRabbit Review
+        if: steps.context-check.outputs.skip == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number("${{ steps.context-check.outputs.pr }}");
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: prNumber,
+            });
+
+            let hasBlockingIssue = false;
+            let reviewCompleted = false;
+
+            for (const comment of comments) {
+              const user = comment.user.login.toLowerCase();
+              if (!user.includes("coderabbit")) continue;
+
+              const body = comment.body.toLowerCase();
+
+              // Detect review completion (VERY IMPORTANT)
+              if (
+                body.includes("review completed") ||
+                body.includes("no actionable comments") ||
+                body.includes("analysis complete")
+              ) {
+                reviewCompleted = true;
+              }
+
+              // Detect severity
+              if (
+                body.includes("critical") ||
+                body.includes("high") ||
+                body.includes("medium") ||
+                body.includes("🔴") ||
+                body.includes("🟠") ||
+                body.includes("🟡")
+              ) {
+                hasBlockingIssue = true;
+                console.log("❌ Blocking issue detected:");
+                console.log(comment.body);
+              }
+            }
+
+            // 🔥 IMPORTANT LOGIC
+            if (!reviewCompleted) {
+              console.log("⏳ CodeRabbit review not completed yet - skipping");
+              return; // DO NOT FAIL
+            }
+
+            if (hasBlockingIssue) {
+              core.setFailed("❌ PR blocked: CodeRabbit issues found (Critical/High/Medium)");
+            } else {
+              console.log("✅ CodeRabbit review completed and no blocking issues");
+            }
