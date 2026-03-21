@@ -1,0 +1,49 @@
+name: CodeRabbit Issue Blocker
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  coderabbit-blocker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check CodeRabbit Issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: prNumber,
+            });
+
+            let hasIssue = false;
+
+            for (const comment of comments) {
+              const isCodeRabbit = comment.user.login.toLowerCase().includes("coderabbit");
+              if (!isCodeRabbit) continue;
+
+              const body = comment.body.toLowerCase();
+
+              if (
+                body.includes("critical") ||
+                body.includes("high") ||
+                body.includes("medium") ||
+                body.includes("🔴") ||
+                body.includes("🟠") ||
+                body.includes("🟡")
+              ) {
+                hasIssue = true;
+                console.log("❌ Blocking issue found:");
+                console.log(comment.body);
+              }
+            }
+
+            if (hasIssue) {
+              core.setFailed("PR blocked due to CodeRabbit issues (Critical/High/Medium)");
+            } else {
+              console.log("✅ No blocking issues");
+            }
