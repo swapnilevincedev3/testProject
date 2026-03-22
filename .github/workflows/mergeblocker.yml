@@ -5,12 +5,17 @@ on:
     types: [opened, synchronize, reopened]
   issue_comment:
     types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited]
 
 # We need permissions to read PRs and write to commit statuses
 permissions:
   pull-requests: read
   issues: read
   statuses: write
+  checks: read
 
 jobs:
   coderabbit-blocker:
@@ -26,13 +31,12 @@ jobs:
             let headSha = null;
 
             if (context.payload.pull_request) {
-               // When triggered by PR directly
+               // Works for pull_request, pull_request_review, and pull_request_review_comment events
                prNumber = context.payload.pull_request.number;
                headSha = context.payload.pull_request.head.sha;
             } else if (context.payload.issue && context.payload.issue.pull_request) {
-               // When triggered by a comment
+               // Works for issue_comment events
                prNumber = context.payload.issue.number;
-               // We must fetch the PR details to get the PR's latest commit (HEAD SHA)
                const { data: pr } = await github.rest.pulls.get({
                  ...context.repo,
                  pull_number: prNumber
@@ -60,73 +64,93 @@ jobs:
           script: |
             const prNumber = Number("${{ steps.context-check.outputs.pr }}");
             const headSha = "${{ steps.context-check.outputs.sha }}";
-
-            // Fetch comments
-            const { data: comments } = await github.rest.issues.listComments({
-              ...context.repo,
-              issue_number: prNumber,
-            });
-
-            let hasBlockingIssue = false;
             let reviewCompleted = false;
 
-             for (const comment of comments) {
-               if (!comment.user) continue;
-               const user = comment.user.login.toLowerCase();
-               if (!user.includes("coderabbit")) continue;
+            // 1. SMART CHECK: Look at the native CodeRabbit Check Run to see if it actually finished!
+            try {
+              const { data: checkRuns } = await github.rest.checks.listForRef({
+                ...context.repo,
+                ref: headSha,
+              });
+              const codeRabbitCheck = checkRuns.check_runs.find(c => c.name === 'CodeRabbit');
+              if (codeRabbitCheck && codeRabbitCheck.status === 'completed') {
+                reviewCompleted = true;
+                console.log("✅ CodeRabbit native check run is completed.");
+              }
+            } catch (err) {
+              console.log("Could not fetch check runs:", err.message);
+            }
 
-               const body = comment.body.toLowerCase();
+            // 2. Fetch ALL types of comments (Issue Comments, PR Reviews, Inline Comments)
+            const allTextToCheck = [];
 
-               // Detect review completion
+            // A. Standard Issue Comments
+            const { data: issues } = await github.rest.issues.listComments({ ...context.repo, issue_number: prNumber });
+            issues.forEach(c => { if(c.user?.login?.includes("coderabbit")) allTextToCheck.push(c.body || ""); });
+
+            // B. Formal PR Reviews Summaries
+            const { data: reviews } = await github.rest.pulls.listReviews({ ...context.repo, pull_number: prNumber });
+            reviews.forEach(c => { 
+               if(c.user?.login?.includes("coderabbit")) {
+                 allTextToCheck.push(c.body || "");
+                 // If CodeRabbit formally submitted a review, mark as completed
+                 if (c.state === 'APPROVED' || c.state === 'CHANGES_REQUESTED') reviewCompleted = true;
+               }
+            });
+
+            // C. Inline Code Comments
+            const { data: inlineComments } = await github.rest.pulls.listReviewComments({ ...context.repo, pull_number: prNumber });
+            inlineComments.forEach(c => { if(c.user?.login?.includes("coderabbit")) allTextToCheck.push(c.body || ""); });
+
+            const combinedText = allTextToCheck.join("\n").toLowerCase();
+
+            // Fallback text check just in case
+            if (!reviewCompleted) {
                if (
-                 body.includes("review completed") ||
-                 body.includes("no actionable comments") ||
-                 body.includes("analysis complete")
+                 combinedText.includes("review completed") ||
+                 combinedText.includes("no actionable comments") ||
+                 combinedText.includes("analysis complete")
                ) {
                  reviewCompleted = true;
                }
+            }
 
-               // Detect severity
-               if (
-                 body.includes("critical") ||
-                 body.includes("high") ||
-                 body.includes("medium") ||
-                 body.includes("🔴") ||
-                 body.includes("🟠") ||
-                 body.includes("🟡")
-               ) {
-                 hasBlockingIssue = true;
-               }
-             }
+            // 3. Detect severity in ANY of the comments
+            const hasBlockingIssue = 
+              combinedText.includes("critical") ||
+              combinedText.includes("high") ||
+              combinedText.includes("medium") ||
+              combinedText.includes("🔴") ||
+              combinedText.includes("🟠") ||
+              combinedText.includes("🟡");
 
-             // default to pending
-             let commitState = 'pending';
-             let commitDescription = '⏳ Waiting for CodeRabbit review to complete...';
+            // 4. Decide final state
+            let commitState = 'pending';
+            let commitDescription = '⏳ Waiting for CodeRabbit review to complete...';
 
-             if (reviewCompleted) {
-               if (hasBlockingIssue) {
-                 commitState = 'failure';
-                 commitDescription = '❌ PR blocked: CodeRabbit issues found';
-               } else {
-                 commitState = 'success';
-                 commitDescription = '✅ CodeRabbit review completed with no blocking issues';
-               }
-             }
+            if (reviewCompleted) {
+              if (hasBlockingIssue) {
+                commitState = 'failure';
+                commitDescription = '❌ PR blocked: CodeRabbit issues found';
+              } else {
+                commitState = 'success';
+                commitDescription = '✅ CodeRabbit review completed with no blocking issues';
+              }
+            }
 
-             console.log(`Setting status check on PR to: ${commitState} (${commitDescription})`);
+            console.log(`Setting status check on PR to: ${commitState} (${commitDescription})`);
 
-             // Use the GitHub API to forcefully change the PR requirement status check
-             await github.rest.repos.createCommitStatus({
-               ...context.repo,
-               sha: headSha,
-               state: commitState,
-               context: 'CodeRabbit Review Status', // <-- This is the name of your new check!
-               description: commitDescription,
-               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`
-             });
+            // 5. Update the PR commit status
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha: headSha,
+              state: commitState,
+              context: 'CodeRabbit Review Status',
+              description: commitDescription,
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`
+            });
 
-             // If there's an issue, optionally mark this github action job as failed
-             // We do NOT fail it on "pending" so we don't spam your actions tab with red 'fails' while waiting.
-             if (commitState === 'failure') {
-               core.setFailed(commitDescription);
-             }
+            // Mark this action itself as failed if it's blocking
+            if (commitState === 'failure') {
+              core.setFailed(commitDescription);
+            }
