@@ -1,5 +1,6 @@
 name: coderabbit-blocker
 
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
