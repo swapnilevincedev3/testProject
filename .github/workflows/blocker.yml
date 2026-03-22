@@ -10,7 +10,6 @@ on:
   pull_request_review_comment:
     types: [created, edited]
 
-# We need permissions to read PRs and write to commit statuses
 permissions:
   pull-requests: read
   issues: read
@@ -31,11 +30,9 @@ jobs:
             let headSha = null;
 
             if (context.payload.pull_request) {
-               // Works for pull_request, pull_request_review, and pull_request_review_comment events
                prNumber = context.payload.pull_request.number;
                headSha = context.payload.pull_request.head.sha;
             } else if (context.payload.issue && context.payload.issue.pull_request) {
-               // Works for issue_comment events
                prNumber = context.payload.issue.number;
                const { data: pr } = await github.rest.pulls.get({
                  ...context.repo,
@@ -66,6 +63,11 @@ jobs:
             const headSha = "${{ steps.context-check.outputs.sha }}";
             let reviewCompleted = false;
 
+            // SMART FIX: Pause for 15 seconds to eliminate the "API Race Condition"!
+            // This gives GitHub's backend enough time to mark CodeRabbit's check as "Completed".
+            console.log("Waiting 15 seconds for GitHub API to sync...");
+            await new Promise(resolve => setTimeout(resolve, 15000));
+
             // 1. SMART CHECK: Look at the native CodeRabbit Check Run to see if it actually finished!
             try {
               const { data: checkRuns } = await github.rest.checks.listForRef({
@@ -93,8 +95,8 @@ jobs:
             reviews.forEach(c => { 
                if(c.user?.login?.includes("coderabbit")) {
                  allTextToCheck.push(c.body || "");
-                 // If CodeRabbit formally submitted a review, mark as completed
-                 if (c.state === 'APPROVED' || c.state === 'CHANGES_REQUESTED') reviewCompleted = true;
+                 // Any formal PR review posted by CodeRabbit confirms it has finished analyzing!
+                 reviewCompleted = true; 
                }
             });
 
@@ -117,12 +119,13 @@ jobs:
 
             // 3. Detect severity in ANY of the comments
             const hasBlockingIssue = 
-              combinedText.includes("critical") ||
-              combinedText.includes("high") ||
-              combinedText.includes("medium") ||
-              combinedText.includes("🔴") ||
-              combinedText.includes("🟠") ||
-              combinedText.includes("🟡");
+               combinedText.includes("critical") ||
+               combinedText.includes("major") ||
+               combinedText.includes("high") ||
+               combinedText.includes("medium") ||
+               combinedText.includes("🔴") ||
+               combinedText.includes("🟠") ||
+               combinedText.includes("🟡");
 
             // 4. Decide final state
             let commitState = 'pending';
@@ -145,7 +148,7 @@ jobs:
               ...context.repo,
               sha: headSha,
               state: commitState,
-              context: 'coderabbit-blocker', // <--- FIXED: Now explicitly targets the 'coderabbit-blocker' check status
+              context: 'coderabbit-blocker',
               description: commitDescription,
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`
             });
