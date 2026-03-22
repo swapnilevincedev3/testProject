@@ -1,4 +1,4 @@
-name: coderabbit-blocker1
+name: coderabbit-blocker
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ permissions:
   statuses: write
 
 jobs:
-  coderabbit-blocker1:
+  coderabbit-blocker:
     runs-on: ubuntu-latest
 
     steps:
