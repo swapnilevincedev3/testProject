@@ -145,7 +145,7 @@ jobs:
               ...context.repo,
               sha: headSha,
               state: commitState,
-              context: 'CodeRabbit Review Status',
+              context: 'coderabbit-blocker', // <--- FIXED: Now explicitly targets the 'coderabbit-blocker' check status
               description: commitDescription,
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`
             });
